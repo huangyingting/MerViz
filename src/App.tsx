@@ -124,10 +124,11 @@ export default function App() {
   const [theme, setTheme] = useState<ThemeKey>(() => (localStorage.getItem('merViz.theme.v1') as ThemeKey) || 'default')
   const [svg, setSvg] = useState<string>('')
   const [error, setError] = useState<string | null>(null)
-  const [autoUpdate, setAutoUpdate] = useState<boolean>(() => localStorage.getItem('merViz.autoupdate.v1') !== 'false')
   const [font, setFont] = useState<string>(() => localStorage.getItem('merViz.font.v1') || 'Inter, system-ui, Avenir, Helvetica, Arial, sans-serif')
+  // Fit mode scales the diagram to fit the preview; label shows 100% in this mode
+  const [fitMode, setFitMode] = useState<boolean>(true)
+  const [fitScale, setFitScale] = useState<number>(1)
   const [zoom, setZoom] = useState<number>(1)
-  const [fitToViewport, setFitToViewport] = useState<boolean>(true)
   const svgContainerRef = useRef<HTMLDivElement>(null)
   const editorRef = useRef<HTMLTextAreaElement>(null)
   const mainRef = useRef<HTMLDivElement>(null)
@@ -168,10 +169,10 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (!autoUpdate) return
+    // Always auto-update with a small debounce
     const id = setTimeout(() => doRender(), 250)
     return () => clearTimeout(id)
-  }, [code, config, autoUpdate])
+  }, [code, config])
 
   useEffect(() => {
     localStorage.setItem('merViz.diagram.v1', code)
@@ -179,10 +180,7 @@ export default function App() {
   useEffect(() => {
   localStorage.setItem('merViz.theme.v1', theme)
   }, [theme])
-  // no background persistence
-  useEffect(() => {
-    localStorage.setItem('merViz.autoupdate.v1', String(autoUpdate))
-  }, [autoUpdate])
+  // removed: auto-update preference persistence (always on)
   useEffect(() => {
     localStorage.setItem('merViz.font.v1', font)
   }, [font])
@@ -200,10 +198,25 @@ export default function App() {
     await downloadPng(svg, 'diagram.png', scale)
   }
 
-  const zoomIn = () => setZoom((z) => Math.min(3, +(z + 0.1).toFixed(2)))
-  const zoomOut = () => setZoom((z) => Math.max(0.2, +(z - 0.1).toFixed(2)))
-  const resetZoom = () => setZoom(1)
-  const enableManualZoom = () => setFitToViewport(false)
+  const clamp = (v: number) => Math.max(0.2, Math.min(3, +v.toFixed(2)))
+  const zoomIn = () => {
+    const base = fitMode ? fitScale : zoom
+    setFitMode(false)
+    setZoom(clamp(base + 0.1))
+  }
+  const zoomOut = () => {
+    const base = fitMode ? fitScale : zoom
+    setFitMode(false)
+    setZoom(clamp(base - 0.1))
+  }
+  const resetZoom = () => {
+    // Return to auto-fit and display 100%
+    setFitMode(true)
+    // Fit scale will be recomputed; set manual zoom back to 1 for future manual mode
+    setZoom(1)
+    // Proactively compute fit to avoid a flicker
+    queueMicrotask(() => computeFitScale())
+  }
 
   // Double-click in preview to jump to and select matching text in the editor
   const focusEditorAtText = (raw: string | null | undefined) => {
@@ -295,7 +308,7 @@ export default function App() {
 
   // Compute a scale so the SVG fits into the visible preview area using all viewport
   const computeFitScale = () => {
-    if (!fitToViewport) return
+    if (!fitMode) return
     const wrap = svgContainerRef.current
     if (!wrap) return
     const inner = wrap.querySelector('.preview__inner') as HTMLDivElement | null
@@ -311,17 +324,17 @@ export default function App() {
     const scaleX = svgRect.width ? availW / svgRect.width : 1
     const scaleY = svgRect.height ? availH / svgRect.height : 1
     const next = Math.max(0.1, Math.min(3, Math.min(scaleX, scaleY)))
-    setZoom(next)
-    // Restore transform according to state on next paint
+    setFitScale(next)
+    // Apply transform immediately to avoid flicker; React will sync next render
     requestAnimationFrame(() => {
       const current = svgContainerRef.current?.querySelector('.preview__inner') as HTMLDivElement | null
-      if (current) current.style.transform = `scale(${next})`
+      if (current && fitMode) current.style.transform = `scale(${next})`
     })
   }
 
   // Re-fit on container resize and window resize
   useEffect(() => {
-    if (!fitToViewport) return
+    if (!fitMode) return
     const wrap = svgContainerRef.current
     if (!wrap) return
     let ro: ResizeObserver | null = new ResizeObserver(() => computeFitScale())
@@ -332,10 +345,10 @@ export default function App() {
       ro?.disconnect(); ro = null
       window.removeEventListener('resize', onWin)
     }
-  }, [fitToViewport, svg])
+  }, [fitMode, svg])
 
   // When switching back to fit, recompute once
-  useEffect(() => { if (fitToViewport) computeFitScale() }, [fitToViewport])
+  useEffect(() => { if (fitMode) computeFitScale() }, [fitMode])
 
   return (
     <div className={"app" + (dragging ? ' is-dragging' : '')}>
@@ -403,10 +416,6 @@ export default function App() {
         <section className="pane" style={{ flex: `0 0 ${leftPct}%` }}>
           <div className="pane__header">
             <div className="pane__title">Code</div>
-            <div className="pane__actions editor-toolbar">
-              <label className="toggle"><input type="checkbox" checked={autoUpdate} onChange={(e) => setAutoUpdate(e.target.checked)} /> Auto-Update</label>
-              <button className="btn" onClick={doRender}>Render</button>
-            </div>
           </div>
           <textarea
             className="editor"
@@ -420,20 +429,19 @@ export default function App() {
         <section className="pane" style={{ flex: '1 1 auto' }}>
           <div className="pane__header">
             <div className="pane__title">Preview</div>
-            <div className="pane__actions preview-toolbar">
-        <label className="toggle"><input type="checkbox" checked={fitToViewport} onChange={(e) => setFitToViewport(e.target.checked)} /> Fit</label>
-        <button className="btn" onClick={() => { enableManualZoom(); zoomOut() }} disabled={fitToViewport}>-</button>
-        <span>{Math.round(zoom * 100)}%</span>
-        <button className="btn" onClick={() => { enableManualZoom(); zoomIn() }} disabled={fitToViewport}>+</button>
-              <div className="sep" />
-        <button className="btn" onClick={() => { setFitToViewport(false); resetZoom() }} disabled={fitToViewport}>Reset</button>
-            </div>
+      <div className="pane__actions preview-toolbar">
+    <button className="btn" onClick={zoomOut}>-</button>
+    <span>{fitMode ? 100 : Math.round(zoom * 100)}%</span>
+    <button className="btn" onClick={zoomIn}>+</button>
+        <div className="sep" />
+    <button className="btn" onClick={resetZoom}>Reset</button>
+      </div>
           </div>
-      <div className="preview" ref={svgContainerRef} style={{ fontFamily: font }} onDoubleClick={onPreviewDoubleClick}>
+  <div className="preview" ref={svgContainerRef} style={{ fontFamily: font }} onDoubleClick={onPreviewDoubleClick}>
             {error ? (
               <div className="error">{error}</div>
             ) : (
-        <div className="preview__inner" style={{ transform: `scale(${zoom})` }} dangerouslySetInnerHTML={{ __html: svg }} />
+  <div className="preview__inner" style={{ transform: `scale(${fitMode ? fitScale : zoom})` }} dangerouslySetInnerHTML={{ __html: svg }} />
             )}
           </div>
         </section>
